@@ -1,8 +1,10 @@
 import base64
 import csv
 from datetime import datetime
+import hashlib
 import io
 import os
+from collections.abc import Mapping
 from openai import OpenAI
 import pandas as pd
 import plotly.express as px
@@ -18,6 +20,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 import streamlit as st
+from auth import verify_password
 
 # Configuração da Página
 st.set_page_config(
@@ -26,8 +29,69 @@ st.set_page_config(
     layout="wide",
 )
 
-ARQUIVO_CSV = "historico_correcoes.csv"
+st.title("🤖 Corretor de Provas Manuscritas com IA - 06/11/2026")
 
+
+def autenticar_professor() -> str | None:
+  auth_config = st.secrets.get("auth", {})
+  users = (
+      auth_config.get("users", {})
+      if isinstance(auth_config, Mapping)
+      else {}
+  )
+  if not isinstance(users, Mapping) or not users:
+    st.error(
+        "Nenhum professor está configurado. Configure usuários em "
+        "`.streamlit/secrets.toml` conforme as instruções do README."
+    )
+    return None
+
+  if st.session_state.get("authenticated"):
+    username = st.session_state.get("username")
+    if username in users:
+      return username
+    st.session_state.pop("authenticated", None)
+    st.session_state.pop("username", None)
+
+  st.subheader("🔐 Acesso de professores")
+  with st.form("login_professor"):
+    username = st.text_input("Usuário")
+    password = st.text_input("Senha", type="password")
+    submitted = st.form_submit_button("Entrar", type="primary")
+
+  if submitted:
+    username = username.strip()
+    password_hash = users.get(username)
+    if (
+        isinstance(password_hash, str)
+        and verify_password(password, password_hash)
+    ):
+      st.session_state["authenticated"] = True
+      st.session_state["username"] = username
+      st.rerun()
+    st.error("Usuário ou senha inválidos.")
+
+  return None
+
+
+def caminho_historico_professor(username: str) -> str:
+  identificador = hashlib.sha256(username.encode("utf-8")).hexdigest()
+  os.makedirs("data", exist_ok=True)
+  return os.path.join("data", f"historico_{identificador}.csv")
+
+
+usuario = autenticar_professor()
+if usuario is None:
+  st.stop()
+
+with st.sidebar:
+  st.caption(f"Conectado como **{usuario}**")
+  if st.button("Sair"):
+    st.session_state.pop("authenticated", None)
+    st.session_state.pop("username", None)
+    st.rerun()
+
+ARQUIVO_CSV = caminho_historico_professor(usuario)
 
 # --- ESQUEMA PYDANTIC PARA STRUCTURED OUTPUTS ---
 class CorrecaoProva(BaseModel):
@@ -263,7 +327,6 @@ def gerar_pdf_consolidado_turma(caminho_csv):
 
 
 # --- INTERFACE STREAMLIT ---
-st.title("🤖 Corretor de Provas Manuscritas com IA - 06/11/2026")
 st.markdown(
     "Faça o upload da imagem da prova, configure o gabarito dinâmico e obtenha"
     " correções instantâneas, relatórios em PDF e estatísticas da turma."

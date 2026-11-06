@@ -1,2 +1,5 @@
 .streamlit/secrets.toml
 sk-proj-*.txt
+data/
+__pycache__/
+*.py[cod]
