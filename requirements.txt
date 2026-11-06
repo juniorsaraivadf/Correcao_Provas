@@ -1,0 +1,6 @@
+streamlit
+openai
+pydantic
+pandas
+plotly
+reportlab
