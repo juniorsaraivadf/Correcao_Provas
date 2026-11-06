@@ -263,7 +263,7 @@ def gerar_pdf_consolidado_turma(caminho_csv):
 
 
 # --- INTERFACE STREAMLIT ---
-st.title("🤖 Corretor de Provas Manuscritas com IA")
+st.title("🤖 Corretor de Provas Manuscritas com IA - 06/11/2026")
 st.markdown(
     "Faça o upload da imagem da prova, configure o gabarito dinâmico e obtenha"
     " correções instantâneas, relatórios em PDF e estatísticas da turma."
@@ -312,7 +312,7 @@ with st.sidebar:
               "Pontos", min_value=0.0, max_value=100.0, step=0.5, format="%.1f"
           ),
       },
-      use_container_width=True,
+      width="stretch",
       key="editor_gabarito",
   )
 
@@ -337,7 +337,7 @@ if arquivo_enviado is not None:
   st.image(
       arquivo_enviado,
       caption="Prova Manuscrita do Aluno",
-      use_container_width=True,
+      width="stretch",
   )
 
   if st.button("✨ Executar Correção Inteligente", type="primary"):
@@ -486,7 +486,7 @@ if os.path.exists(ARQUIVO_CSV):
           color_discrete_sequence=["#4F46E5"],
       )
       fig_hist.update_layout(bargap=0.1)
-      st.plotly_chart(fig_hist, use_container_width=True)
+      st.plotly_chart(fig_hist, width="stretch")
 
     with col_graf2:
       st.markdown("#### 📦 Dispersão Estatística (Boxplot)")
@@ -498,10 +498,10 @@ if os.path.exists(ARQUIVO_CSV):
           color_discrete_sequence=["#10B981"],
           points="all",
       )
-      st.plotly_chart(fig_box, use_container_width=True)
+      st.plotly_chart(fig_box, width="stretch")
 
     st.markdown("#### 📋 Histórico Consolidado de Notas")
-    st.dataframe(df_historico, use_container_width=True)
+    st.dataframe(df_historico, width="stretch")
 
     col_down1, col_down2 = st.columns(2)
     with col_down1:
