@@ -272,12 +272,16 @@ st.markdown(
 # --- BARRA LATERAL: CONFIGURAÇÕES E GABARITO DINÂMICO ---
 with st.sidebar:
   st.header("⚙️ Configurações")
-  api_key = st.text_input(
-      "Chave da API OpenAI",
-      type="password",
-      placeholder="sk-...",
-      help="Insira sua chave de API da OpenAI.",
-  )
+#  api_key = st.text_input(
+#      "Chave da API OpenAI",
+#      type="password",
+#      placeholder="sk-...",
+#      help="Insira sua chave de API da OpenAI.",
+#  )
+  # Em vez de st.text_input para a chave, você pode carregar direto dos secrets:
+  api_key = st.secrets.get("OPENAI_API_KEY", "")
+     if not api_key:
+         api_key = st.sidebar.text_input("Chave da API OpenAI", type="password")
 
   st.markdown("---")
   st.subheader("📋 Critérios e Pesos da Prova")
