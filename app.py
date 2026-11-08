@@ -9,6 +9,7 @@ from pathlib import Path
 from openai import OpenAI
 import pandas as pd
 import plotly.express as px
+import pymupdf
 from pydantic import BaseModel, Field
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -397,18 +398,69 @@ with st.sidebar:
     )
 
 # --- ÁREA PRINCIPAL: UPLOAD E CORREÇÃO ---
-arquivo_enviado = st.file_uploader(
-    "Envie a imagem da prova manuscrita do aluno", type=["jpg", "jpeg", "png"]
+MAX_PAGINAS = 10
+DPI_PDF = 150
+TIPOS_IMAGEM = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}
+
+
+@st.cache_data(max_entries=20)
+def paginas_do_pdf(conteudo: bytes) -> list[bytes]:
+  """Converte cada página de um PDF em uma imagem PNG."""
+  with pymupdf.open(stream=conteudo, filetype="pdf") as documento:
+    return [
+        pagina.get_pixmap(dpi=DPI_PDF).tobytes("png") for pagina in documento
+    ]
+
+
+def montar_paginas(arquivos) -> list[tuple[str, str, bytes]]:
+  """Retorna (rótulo, tipo MIME, bytes) de cada página, na ordem de envio."""
+  paginas = []
+  for arquivo in arquivos:
+    extensao = arquivo.name.rsplit(".", 1)[-1].lower()
+    if extensao == "pdf":
+      imagens = paginas_do_pdf(arquivo.getvalue())
+      for numero, imagem in enumerate(imagens, start=1):
+        paginas.append((f"{arquivo.name} (pág. {numero})", "image/png", imagem))
+    else:
+      paginas.append((arquivo.name, TIPOS_IMAGEM[extensao], arquivo.getvalue()))
+  return paginas
+
+
+arquivos_enviados = st.file_uploader(
+    "Envie as páginas da prova manuscrita do aluno (imagens ou PDF)",
+    type=["jpg", "jpeg", "png", "pdf"],
+    accept_multiple_files=True,
+    help=(
+        "Envie todas as páginas de uma mesma prova, na ordem. Pode ser um PDF"
+        " com várias páginas, várias imagens ou uma combinação dos dois."
+        f" Limite de {MAX_PAGINAS} páginas por prova."
+    ),
 )
 nome_aluno = st.text_input(
     "Nome do Aluno(a):", value="Estudante Exemplo", max_chars=100
 )
 
-if arquivo_enviado is not None:
+paginas = []
+if arquivos_enviados:
+  try:
+    paginas = montar_paginas(arquivos_enviados)
+  except Exception as e:
+    st.error(f"Não foi possível ler os arquivos enviados: {e}")
+
+  if paginas and len(paginas) > MAX_PAGINAS:
+    st.error(
+        f"A prova tem {len(paginas)} páginas, acima do limite de"
+        f" {MAX_PAGINAS}. Envie apenas as páginas desta prova."
+    )
+    paginas = []
+
+if paginas:
+  st.caption(f"{len(paginas)} página(s) da prova, na ordem em que serão lidas:")
   st.image(
-      arquivo_enviado,
-      caption="Prova Manuscrita do Aluno",
-      width="stretch",
+      [imagem for _, _, imagem in paginas],
+      caption=[f"Página {i} · {rotulo}" for i, (rotulo, _, _) in enumerate(paginas, start=1)],
+      width=280,
+      alt=[f"Página {i} da prova manuscrita" for i in range(1, len(paginas) + 1)],
   )
 
   if st.button("✨ Executar Correção Inteligente", type="primary"):
@@ -417,11 +469,11 @@ if arquivo_enviado is not None:
           "Por favor, informe sua chave da API da OpenAI na barra lateral."
       )
     else:
-      with st.spinner("Analisando caligrafia e avaliando com GPT-4o..."):
+      with st.spinner(
+          f"Analisando caligrafia de {len(paginas)} página(s) com GPT-4o..."
+      ):
         try:
           client = OpenAI(api_key=api_key)
-          bytes_imagem = arquivo_enviado.getvalue()
-          imagem_base64 = base64.b64encode(bytes_imagem).decode("utf-8")
 
           prompt_sistema = (
               "Você é um professor assistente especialista em pedagogia e"
@@ -430,29 +482,33 @@ if arquivo_enviado is not None:
               f" exatamente {nota_maxima_total}."
           )
           prompt_usuario = (
-              f"Gabarito e rubrica:\n{gabarito_e_rubrica}\n\nAnalise a imagem"
-              " manuscrita da prova do aluno anexa e preencha a avaliação"
+              f"Gabarito e rubrica:\n{gabarito_e_rubrica}\n\nAs"
+              f" {len(paginas)} imagem(ns) anexas são as páginas, em ordem,"
+              " da prova manuscrita de um único aluno. Uma resposta pode"
+              " continuar de uma página para a seguinte. Analise todas as"
+              " páginas em conjunto e preencha uma única avaliação"
               " estruturada."
           )
+
+          conteudo_usuario = [{"type": "text", "text": prompt_usuario}]
+          for i, (_, tipo_mime, imagem) in enumerate(paginas, start=1):
+            imagem_base64 = base64.b64encode(imagem).decode("utf-8")
+            conteudo_usuario.append(
+                {"type": "text", "text": f"Página {i} de {len(paginas)}:"}
+            )
+            conteudo_usuario.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{tipo_mime};base64,{imagem_base64}",
+                    "detail": "high",
+                },
+            })
 
           resposta = client.beta.chat.completions.parse(
               model="gpt-4o",
               messages=[
                   {"role": "system", "content": prompt_sistema},
-                  {
-                      "role": "user",
-                      "content": [
-                          {"type": "text", "text": prompt_usuario},
-                          {
-                              "type": "image_url",
-                              "image_url": {
-                                  "url": (
-                                      f"data:image/jpeg;base64,{imagem_base64}"
-                                  )
-                              },
-                          },
-                      ],
-                  },
+                  {"role": "user", "content": conteudo_usuario},
               ],
               response_format=CorrecaoProva,
           )
@@ -465,7 +521,7 @@ if arquivo_enviado is not None:
           novo_registro = {
               "Data_Hora": data_hora_atual,
               "Aluno": nome_aluno,
-              "Arquivo": arquivo_enviado.name,
+              "Arquivo": ", ".join(a.name for a in arquivos_enviados),
               "Nota_Atribuida": correcao.nota_atribuida,
               "Nota_Maxima": correcao.nota_maxima,
               "Pontos_Fortes": " | ".join(correcao.pontos_fortes),

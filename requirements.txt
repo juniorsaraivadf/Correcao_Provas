@@ -3,4 +3,5 @@ openai
 pydantic
 pandas
 plotly
+pymupdf
 reportlab
