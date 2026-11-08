@@ -5,6 +5,7 @@ import hashlib
 import io
 import os
 from collections.abc import Mapping
+from pathlib import Path
 from openai import OpenAI
 import pandas as pd
 import plotly.express as px
@@ -29,7 +30,14 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🤖 Corretor de Provas Manuscritas com IA - 06/11/2026")
+LOGO_SETI = Path(__file__).parent / "assets" / "logo_seti.jpg"
+st.image(
+    str(LOGO_SETI),
+    width=420,
+    alt="Logo da SETI - Semana de Tecnologia Industrial, IFCE Campus Limoeiro do Norte",
+)
+
+st.title("🤖 Corretor de Provas Manuscritas com IA")
 
 
 def autenticar_professor() -> str | None:
