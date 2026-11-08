@@ -3,7 +3,9 @@ import csv
 from datetime import datetime
 import hashlib
 import io
+import json
 import os
+import unicodedata
 from collections.abc import Mapping
 from pathlib import Path
 from openai import OpenAI
@@ -87,6 +89,125 @@ def caminho_historico_professor(username: str) -> str:
   identificador = hashlib.sha256(username.encode("utf-8")).hexdigest()
   os.makedirs("data", exist_ok=True)
   return os.path.join("data", f"historico_{identificador}.csv")
+
+
+# --- GABARITOS SALVOS POR PROFESSOR ---
+COLUNAS_GABARITO = ["Questao", "Descricao", "Valor"]
+NOVO_GABARITO = "➕ Novo gabarito"
+MAX_CHARS_NOME_GABARITO = 60
+# Nomes de colunas aceitos na importação de CSV (além dos internos).
+SINONIMOS_COLUNAS = {
+    "questão": "Questao",
+    "nome/número": "Questao",
+    "descrição": "Descricao",
+    "gabarito e critérios": "Descricao",
+    "pontos": "Valor",
+}
+
+
+def chave_ordenacao(nome: str) -> str:
+  """Ordem alfabética que ignora acentos e maiúsculas (á junto de a)."""
+  sem_acentos = unicodedata.normalize("NFKD", nome)
+  return "".join(c for c in sem_acentos if not unicodedata.combining(c)).lower()
+
+
+def caminho_gabaritos_professor(username: str) -> str:
+  identificador = hashlib.sha256(username.encode("utf-8")).hexdigest()
+  os.makedirs("data", exist_ok=True)
+  return os.path.join("data", f"gabaritos_{identificador}.json")
+
+
+def gabarito_exemplo() -> pd.DataFrame:
+  return pd.DataFrame({
+      "Questao": ["Questão 1", "Questão 2"],
+      "Descricao": [
+          "Calcular a derivada de f(x) = x^3 (Resposta esperada: 3x^2)",
+          (
+              "Calcular o limite fundamental sen(x)/x com x->0 (Resposta"
+              " esperada: 1)"
+          ),
+      ],
+      "Valor": [5.0, 5.0],
+  })
+
+
+def normalizar_gabarito(df: pd.DataFrame) -> pd.DataFrame:
+  """Padroniza colunas e tipos e remove linhas totalmente vazias."""
+  df = df.reindex(columns=COLUNAS_GABARITO).copy()
+  for coluna in ("Questao", "Descricao"):
+    df[coluna] = df[coluna].fillna("").astype(str).str.strip()
+  df["Valor"] = pd.to_numeric(
+      df["Valor"].astype(str).str.replace(",", ".").str.strip(),
+      errors="coerce",
+  )
+  vazia = (df["Questao"] == "") & (df["Descricao"] == "") & df["Valor"].isna()
+  return df[~vazia].reset_index(drop=True)
+
+
+def carregar_gabaritos(caminho: str) -> dict[str, pd.DataFrame]:
+  if not os.path.exists(caminho):
+    return {}
+  try:
+    with open(caminho, encoding="utf-8") as f:
+      bruto = json.load(f)
+  except (OSError, ValueError) as e:
+    st.warning(f"Não foi possível ler os gabaritos salvos: {e}")
+    return {}
+  if not isinstance(bruto, dict):
+    return {}
+  return {
+      str(nome): normalizar_gabarito(pd.DataFrame(linhas))
+      for nome, linhas in bruto.items()
+      if isinstance(linhas, list)
+  }
+
+
+def salvar_gabaritos(caminho: str, gabaritos: dict[str, pd.DataFrame]) -> None:
+  dados = {
+      nome: df[COLUNAS_GABARITO].to_dict(orient="records")
+      for nome, df in sorted(
+          gabaritos.items(), key=lambda item: chave_ordenacao(item[0])
+      )
+  }
+  temporario = caminho + ".tmp"
+  with open(temporario, "w", encoding="utf-8") as f:
+    json.dump(dados, f, ensure_ascii=False, indent=2)
+  os.replace(temporario, caminho)  # troca atômica: não corrompe o arquivo
+
+
+def gabarito_para_csv(df: pd.DataFrame) -> bytes:
+  """CSV com ';' e vírgula decimal, que o Excel em português abre direto."""
+  texto = df[COLUNAS_GABARITO].to_csv(index=False, sep=";", decimal=",")
+  return ("﻿" + texto).encode("utf-8")
+
+
+def ler_csv_gabarito(conteudo: bytes) -> pd.DataFrame:
+  try:
+    texto = conteudo.decode("utf-8-sig")
+  except UnicodeDecodeError:
+    texto = conteudo.decode("latin-1")  # CSV salvo pelo Excel no Windows
+  df = pd.read_csv(
+      io.StringIO(texto), sep=None, engine="python", dtype=str,
+      keep_default_na=False,
+  )
+  df = df.rename(
+      columns=lambda c: SINONIMOS_COLUNAS.get(c.strip().lower(), c.strip())
+  )
+  faltando = [c for c in COLUNAS_GABARITO if c not in df.columns]
+  if faltando:
+    raise ValueError(
+        "o CSV precisa das colunas Questao, Descricao e Valor (faltando: "
+        + ", ".join(faltando) + ")."
+    )
+  df = normalizar_gabarito(df)
+  if df.empty:
+    raise ValueError("o CSV não tem nenhuma questão.")
+  invalidas = df.loc[df["Valor"].isna(), "Questao"].tolist()
+  if invalidas:
+    raise ValueError(
+        "pontuação vazia ou inválida em: " + ", ".join(invalidas) + "."
+    )
+  return df
 
 
 usuario = autenticar_professor()
@@ -358,20 +479,74 @@ with st.sidebar:
   st.markdown("---")
   st.subheader("📋 Critérios e Pesos da Prova")
 
-  dados_iniciais = pd.DataFrame({
-      "Questao": ["Questão 1", "Questão 2"],
-      "Descricao": [
-          "Calcular a derivada de f(x) = x^3 (Resposta esperada: 3x^2)",
-          (
-              "Calcular o limite fundamental sen(x)/x com x->0 (Resposta"
-              " esperada: 1)"
-          ),
-      ],
-      "Valor": [5.0, 5.0],
-  })
+  caminho_gabaritos = caminho_gabaritos_professor(usuario)
+  gabaritos = carregar_gabaritos(caminho_gabaritos)
 
+  # O editor é recriado (nova chave) sempre que outro gabarito é carregado.
+  if "gabarito_base" not in st.session_state:
+    st.session_state["gabarito_base"] = gabarito_exemplo()
+    st.session_state["gabarito_nome"] = ""
+    st.session_state["gabarito_versao"] = 0
+
+  def carregar_no_editor(df: pd.DataFrame, nome: str) -> None:
+    st.session_state["gabarito_base"] = df
+    st.session_state["gabarito_nome"] = nome
+    st.session_state["gabarito_versao"] += 1
+
+  def ao_escolher_gabarito(caminho: str) -> None:
+    escolha = st.session_state["escolha_gabarito"]
+    if escolha == NOVO_GABARITO:
+      carregar_no_editor(gabarito_exemplo(), "")
+      return
+    salvos = carregar_gabaritos(caminho)
+    if escolha in salvos:
+      carregar_no_editor(salvos[escolha], escolha)
+
+  def ao_importar_csv(chave: str) -> None:
+    arquivo = st.session_state.get(chave)
+    if arquivo is None:
+      return
+    try:
+      df = ler_csv_gabarito(arquivo.getvalue())
+    except Exception as e:
+      st.session_state["gabarito_msg"] = (
+          "error", f"Não foi possível importar {arquivo.name}: {e}"
+      )
+      return
+    carregar_no_editor(df, Path(arquivo.name).stem[:MAX_CHARS_NOME_GABARITO])
+    st.session_state["escolha_gabarito"] = NOVO_GABARITO
+    st.session_state["gabarito_msg"] = (
+        "success",
+        f"{len(df)} questão(ões) importadas de {arquivo.name}. Clique em"
+        " Salvar para guardar o gabarito.",
+    )
+
+  # Seleção pedida por um salvamento/exclusão na execução anterior.
+  if "gabarito_selecionar" in st.session_state:
+    st.session_state["escolha_gabarito"] = st.session_state.pop(
+        "gabarito_selecionar"
+    )
+  opcoes = [NOVO_GABARITO] + sorted(gabaritos, key=chave_ordenacao)
+  if st.session_state.get("escolha_gabarito") not in opcoes:
+    st.session_state["escolha_gabarito"] = NOVO_GABARITO
+
+  escolha = st.selectbox(
+      "Gabarito",
+      opcoes,
+      key="escolha_gabarito",
+      on_change=ao_escolher_gabarito,
+      args=(caminho_gabaritos,),
+      help="Escolha um gabarito salvo ou comece um novo.",
+  )
+
+  mensagem = st.session_state.pop("gabarito_msg", None)
+  if mensagem:
+    tipo, texto = mensagem
+    (st.success if tipo == "success" else st.error)(texto)
+
+  versao = st.session_state["gabarito_versao"]
   tabela_editada = st.data_editor(
-      dados_iniciais,
+      st.session_state["gabarito_base"],
       num_rows="dynamic",
       column_config={
           "Questao": st.column_config.TextColumn(
@@ -381,18 +556,104 @@ with st.sidebar:
               "Gabarito e Critérios", required=True, width="large"
           ),
           "Valor": st.column_config.NumberColumn(
-              "Pontos", min_value=0.0, max_value=100.0, step=0.5, format="%.1f"
+              "Pontos",
+              required=True,
+              min_value=0.0,
+              max_value=100.0,
+              step=0.5,
+              format="%.1f",
           ),
       },
       width="stretch",
-      key="editor_gabarito",
+      hide_index=True,
+      key=f"editor_gabarito_{versao}",
+  )
+  tabela = normalizar_gabarito(tabela_editada)
+
+  salvo = gabaritos.get(escolha)
+  if salvo is not None and not tabela.equals(salvo):
+    st.caption(":orange[:material/edit: Alterações ainda não salvas]")
+
+  nome_gabarito = st.text_input(
+      "Nome do gabarito",
+      value=st.session_state["gabarito_nome"],
+      max_chars=MAX_CHARS_NOME_GABARITO,
+      placeholder="Ex.: Cálculo I - Prova 1",
+      key=f"nome_gabarito_{versao}",
+      help="Salvar com um nome que já existe substitui aquele gabarito.",
   )
 
-  nota_maxima_total = tabela_editada["Valor"].sum()
+  with st.container(horizontal=True):
+    clicou_salvar = st.button(
+        "Salvar", icon=":material/save:", type="primary"
+    )
+    if escolha != NOVO_GABARITO:
+      with st.popover("Excluir", icon=":material/delete:"):
+        st.write(f"Excluir o gabarito “{escolha}”? Não é possível desfazer.")
+        if st.button("Confirmar exclusão", type="primary"):
+          gabaritos.pop(escolha, None)
+          salvar_gabaritos(caminho_gabaritos, gabaritos)
+          carregar_no_editor(gabarito_exemplo(), "")
+          st.session_state["gabarito_selecionar"] = NOVO_GABARITO
+          st.session_state["gabarito_msg"] = (
+              "success", f"Gabarito “{escolha}” excluído."
+          )
+          st.rerun()
+
+  if clicou_salvar:
+    nome_limpo = nome_gabarito.strip()
+    if not nome_limpo:
+      st.error("Dê um nome ao gabarito antes de salvar.")
+    elif tabela.empty:
+      st.error("O gabarito precisa ter pelo menos uma questão.")
+    elif tabela["Valor"].isna().any():
+      st.error("Preencha os pontos de todas as questões antes de salvar.")
+    else:
+      ja_existia = nome_limpo in gabaritos
+      gabaritos[nome_limpo] = tabela
+      salvar_gabaritos(caminho_gabaritos, gabaritos)
+      carregar_no_editor(tabela, nome_limpo)
+      st.session_state["gabarito_selecionar"] = nome_limpo
+      st.session_state["gabarito_msg"] = (
+          "success",
+          f"Gabarito “{nome_limpo}” {'atualizado' if ja_existia else 'salvo'}.",
+      )
+      st.rerun()
+
+  with st.expander("Exportar ou importar CSV", icon=":material/swap_vert:"):
+    nome_arquivo = "".join(
+        c if c.isalnum() else "_" for c in (nome_gabarito.strip() or "novo")
+    )
+    st.download_button(
+        "Exportar gabarito em CSV",
+        data=gabarito_para_csv(tabela),
+        file_name=f"gabarito_{nome_arquivo}.csv",
+        mime="text/csv",
+        icon=":material/download:",
+        on_click="ignore",
+        disabled=tabela.empty,
+        width="stretch",
+    )
+    chave_importacao = f"importar_csv_{versao}"
+    st.file_uploader(
+        "Importar gabarito de um CSV",
+        type=["csv"],
+        key=chave_importacao,
+        on_change=ao_importar_csv,
+        args=(chave_importacao,),
+        help=(
+            "O CSV precisa das colunas Questao, Descricao e Valor (separadas"
+            " por ';' ou ','). O gabarito importado aparece na tabela acima;"
+            " clique em Salvar para guardá-lo."
+        ),
+    )
+
+  tabela_rubrica = tabela.assign(Valor=tabela["Valor"].fillna(0.0))
+  nota_maxima_total = tabela_rubrica["Valor"].sum()
   st.info(f"🏆 **Nota Máxima Total:** {nota_maxima_total:.1f} pontos")
 
   gabarito_e_rubrica = f"Nota Máxima Total: {nota_maxima_total}\nCritérios:\n"
-  for _, row in tabela_editada.iterrows():
+  for _, row in tabela_rubrica.iterrows():
     gabarito_e_rubrica += (
         f"- {row['Questao']} (Valor: {row['Valor']} pontos): {row['Descricao']}\n"
     )
@@ -468,6 +729,8 @@ if paginas:
       st.error(
           "Por favor, informe sua chave da API da OpenAI na barra lateral."
       )
+    elif tabela_rubrica.empty:
+      st.error("O gabarito está vazio. Adicione as questões na barra lateral.")
     else:
       with st.spinner(
           f"Analisando caligrafia de {len(paginas)} página(s) com GPT-4o..."
